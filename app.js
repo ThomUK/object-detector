@@ -10,6 +10,8 @@ const statusEl = document.getElementById('status');
 const fpsEl = document.getElementById('fps');
 const startBtn = document.getElementById('startBtn');
 const flipBtn = document.getElementById('flipBtn');
+const captureBtn = document.getElementById('captureBtn');
+const flashEl = document.getElementById('flash');
 const modelRadios = document.querySelectorAll('input[name="model"]');
 
 const COLORS = [
@@ -283,6 +285,7 @@ async function start() {
     setStatus('', false);
     fpsEl.classList.add('visible');
     flipBtn.disabled = false;
+    captureBtn.disabled = false;
     startBtn.textContent = 'Stop';
     running = true;
     lastFrameTime = 0;
@@ -291,6 +294,7 @@ async function start() {
     console.error(err);
     setStatus(`Error: ${err.message || err}`);
     flipBtn.disabled = true;
+    captureBtn.disabled = true;
     startBtn.textContent = 'Start';
   } finally {
     startBtn.disabled = false;
@@ -306,11 +310,76 @@ function stop() {
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   fpsEl.classList.remove('visible');
   flipBtn.disabled = true;
+  captureBtn.disabled = true;
   startBtn.textContent = 'Start';
   setStatus('Stopped. Tap <b>Start</b> to begin again');
 }
 
+async function capture() {
+  if (!running || !video.videoWidth) return;
+  const w = video.videoWidth;
+  const h = video.videoHeight;
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  const octx = out.getContext('2d');
+  octx.drawImage(video, 0, 0, w, h);
+
+  const lineWidth = Math.max(2, Math.round(Math.min(w, h) / 360));
+  const fontSize = Math.max(14, Math.round(Math.min(w, h) / 42));
+  octx.lineWidth = lineWidth;
+  octx.font = `600 ${fontSize}px -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif`;
+  octx.textBaseline = 'top';
+
+  for (const track of tracks.values()) {
+    if (track.score < MIN_DISPLAY_SCORE) continue;
+    const [x, y, bw, bh] = track.bbox;
+    const color = colorFor(track.class);
+    octx.strokeStyle = color;
+    octx.strokeRect(x, y, bw, bh);
+    const label = `${track.class} ${Math.round(track.score * 100)}%`;
+    const padX = Math.round(fontSize * 0.5);
+    const padY = Math.round(fontSize * 0.3);
+    const textW = octx.measureText(label).width;
+    const labelH = fontSize + padY * 2;
+    const labelY = y - labelH >= 0 ? y - labelH : y;
+    octx.fillStyle = color;
+    octx.fillRect(x, labelY, textW + padX * 2, labelH);
+    octx.fillStyle = '#06201d';
+    octx.fillText(label, x + padX, labelY + padY);
+  }
+
+  flashEl.classList.add('show');
+  setTimeout(() => flashEl.classList.remove('show'), 120);
+
+  const blob = await new Promise((resolve) => out.toBlob(resolve, 'image/png'));
+  if (!blob) return;
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace(/-\d+Z$/, 'Z');
+  const filename = `object-detector-${stamp}.png`;
+  const file = new File([blob], filename, { type: 'image/png' });
+
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: 'Object detection capture' });
+      return;
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+    }
+  }
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 startBtn.addEventListener('click', () => (running ? stop() : start()));
+captureBtn.addEventListener('click', capture);
 
 flipBtn.addEventListener('click', async () => {
   if (!running) return;

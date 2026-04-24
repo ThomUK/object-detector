@@ -79,6 +79,20 @@ main {
 
 #fps.visible { display: block; }
 
+#flash {
+  position: absolute;
+  inset: 0;
+  background: #ffffff;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms ease-out;
+}
+
+#flash.show {
+  opacity: 0.75;
+  transition-duration: 40ms;
+}
+
 #controls {
   flex: 0 0 auto;
   display: flex;
