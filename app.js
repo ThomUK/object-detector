@@ -24,6 +24,18 @@ let running = false;
 let lastFrameTime = 0;
 let fpsAvg = 0;
 
+// Temporal smoothing: treat each detection frame as an update to a tracked
+// object rather than an independent draw, so boxes stop flickering.
+const IOU_MATCH_THRESHOLD = 0.3;
+const BBOX_ALPHA = 0.35;         // EMA weight for new detection on bbox
+const SCORE_ALPHA = 0.4;         // EMA weight for new detection on score
+const MIN_NEW_SCORE = 0.5;       // gate for creating a new track
+const MIN_DISPLAY_SCORE = 0.4;   // hide smoothed tracks below this
+const MAX_MISSES = 6;            // keep a track alive across short dropouts
+
+const tracks = new Map();
+let nextTrackId = 1;
+
 const setStatus = (msg, visible = true) => {
   statusEl.innerHTML = msg;
   statusEl.classList.toggle('hidden', !visible);
@@ -89,7 +101,59 @@ function videoDrawRect() {
   return { sx, sy, scale, sW, sH };
 }
 
-function drawPredictions(predictions) {
+function iou(a, b) {
+  const x1 = Math.max(a[0], b[0]);
+  const y1 = Math.max(a[1], b[1]);
+  const x2 = Math.min(a[0] + a[2], b[0] + b[2]);
+  const y2 = Math.min(a[1] + a[3], b[1] + b[3]);
+  const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  const union = a[2] * a[3] + b[2] * b[3] - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+function updateTracks(predictions) {
+  const matched = new Set();
+  for (const track of tracks.values()) {
+    let bestIdx = -1;
+    let bestIou = IOU_MATCH_THRESHOLD;
+    for (let i = 0; i < predictions.length; i++) {
+      if (matched.has(i)) continue;
+      const p = predictions[i];
+      if (p.class !== track.class) continue;
+      const score = iou(track.bbox, p.bbox);
+      if (score > bestIou) { bestIou = score; bestIdx = i; }
+    }
+    if (bestIdx >= 0) {
+      const p = predictions[bestIdx];
+      matched.add(bestIdx);
+      for (let k = 0; k < 4; k++) {
+        track.bbox[k] += (p.bbox[k] - track.bbox[k]) * BBOX_ALPHA;
+      }
+      track.score += (p.score - track.score) * SCORE_ALPHA;
+      track.misses = 0;
+    } else {
+      track.misses += 1;
+    }
+  }
+
+  for (let i = 0; i < predictions.length; i++) {
+    if (matched.has(i)) continue;
+    const p = predictions[i];
+    if (p.score < MIN_NEW_SCORE) continue;
+    tracks.set(nextTrackId++, {
+      class: p.class,
+      bbox: p.bbox.slice(),
+      score: p.score,
+      misses: 0,
+    });
+  }
+
+  for (const [id, track] of tracks) {
+    if (track.misses > MAX_MISSES) tracks.delete(id);
+  }
+}
+
+function drawTracks() {
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   const { sx, sy, scale } = videoDrawRect();
   const dpr = window.devicePixelRatio || 1;
@@ -99,18 +163,19 @@ function drawPredictions(predictions) {
   ctx.font = `600 ${fontSize}px -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif`;
   ctx.textBaseline = 'top';
 
-  for (const p of predictions) {
-    const [x, y, w, h] = p.bbox;
+  for (const track of tracks.values()) {
+    if (track.score < MIN_DISPLAY_SCORE) continue;
+    const [x, y, w, h] = track.bbox;
     const bx = sx + x * scale;
     const by = sy + y * scale;
     const bw = w * scale;
     const bh = h * scale;
-    const color = colorFor(p.class);
+    const color = colorFor(track.class);
 
     ctx.strokeStyle = color;
     ctx.strokeRect(bx, by, bw, bh);
 
-    const label = `${p.class} ${Math.round(p.score * 100)}%`;
+    const label = `${track.class} ${Math.round(track.score * 100)}%`;
     const padX = 6 * dpr;
     const padY = 4 * dpr;
     const textW = ctx.measureText(label).width;
@@ -128,7 +193,8 @@ async function detectLoop() {
   if (!running) return;
   try {
     const predictions = await model.detect(video);
-    drawPredictions(predictions);
+    updateTracks(predictions);
+    drawTracks();
 
     const now = performance.now();
     if (lastFrameTime) {
@@ -172,6 +238,7 @@ function stop() {
   if (rafId) cancelAnimationFrame(rafId);
   rafId = null;
   stopCamera();
+  tracks.clear();
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   fpsEl.classList.remove('visible');
   flipBtn.disabled = true;
@@ -186,6 +253,7 @@ flipBtn.addEventListener('click', async () => {
   facingMode = facingMode === 'environment' ? 'user' : 'environment';
   flipBtn.disabled = true;
   try {
+    tracks.clear();
     await startCamera();
   } catch (err) {
     setStatus(`Error: ${err.message || err}`);
