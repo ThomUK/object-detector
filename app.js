@@ -1,3 +1,8 @@
+import {
+  ObjectDetector,
+  FilesetResolver,
+} from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
+
 const video = document.getElementById('video');
 const overlay = document.getElementById('overlay');
 const ctx = overlay.getContext('2d');
@@ -5,6 +10,7 @@ const statusEl = document.getElementById('status');
 const fpsEl = document.getElementById('fps');
 const startBtn = document.getElementById('startBtn');
 const flipBtn = document.getElementById('flipBtn');
+const modelRadios = document.querySelectorAll('input[name="model"]');
 
 const COLORS = [
   '#37c2b5', '#f2c14e', '#ef6f6c', '#7b9acc',
@@ -16,13 +22,64 @@ const colorFor = (label) => {
   return COLORS[h % COLORS.length];
 };
 
-let model = null;
 let stream = null;
 let facingMode = 'environment';
 let rafId = null;
 let running = false;
 let lastFrameTime = 0;
 let fpsAvg = 0;
+
+const MEDIAPIPE_VERSION = '0.10.14';
+const MEDIAPIPE_WASM = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/wasm`;
+const EFFICIENTDET_LITE0_URL =
+  'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite';
+
+const detectors = {
+  'coco-ssd': {
+    label: 'COCO-SSD',
+    instance: null,
+    async load() {
+      if (this.instance) return;
+      this.instance = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+    },
+    async detect(video) {
+      const raw = await this.instance.detect(video);
+      return raw.map((p) => ({ class: p.class, score: p.score, bbox: p.bbox }));
+    },
+  },
+  'efficientdet-lite0': {
+    label: 'EfficientDet-Lite0',
+    instance: null,
+    async load() {
+      if (this.instance) return;
+      const vision = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM);
+      this.instance = await ObjectDetector.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: EFFICIENTDET_LITE0_URL,
+          delegate: 'GPU',
+        },
+        scoreThreshold: 0.3,
+        runningMode: 'VIDEO',
+      });
+    },
+    async detect(video) {
+      const result = this.instance.detectForVideo(video, performance.now());
+      return result.detections.map((d) => {
+        const cat = d.categories[0] || { categoryName: 'object', score: 0 };
+        return {
+          class: cat.categoryName,
+          score: cat.score,
+          bbox: [d.boundingBox.originX, d.boundingBox.originY, d.boundingBox.width, d.boundingBox.height],
+        };
+      });
+    },
+  },
+};
+
+let activeDetectorKey = 'coco-ssd';
+// Bumped on every model switch so an in-flight detect() from the previous
+// model can be discarded instead of polluting the tracker.
+let detectorGen = 0;
 
 // Temporal smoothing: treat each detection frame as an update to a tracked
 // object rather than an independent draw, so boxes stop flickering.
@@ -41,11 +98,13 @@ const setStatus = (msg, visible = true) => {
   statusEl.classList.toggle('hidden', !visible);
 };
 
-async function ensureModel() {
-  if (model) return model;
-  setStatus('Loading model…');
-  model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
-  return model;
+async function ensureActiveDetector() {
+  const d = detectors[activeDetectorKey];
+  if (!d.instance) {
+    setStatus(`Loading ${d.label}…`);
+    await d.load();
+  }
+  return d;
 }
 
 async function startCamera() {
@@ -192,7 +251,12 @@ function drawTracks() {
 async function detectLoop() {
   if (!running) return;
   try {
-    const predictions = await model.detect(video);
+    const gen = detectorGen;
+    const predictions = await detectors[activeDetectorKey].detect(video);
+    if (gen !== detectorGen) {
+      rafId = requestAnimationFrame(detectLoop);
+      return;
+    }
     updateTracks(predictions);
     drawTracks();
 
@@ -213,7 +277,7 @@ async function detectLoop() {
 async function start() {
   startBtn.disabled = true;
   try {
-    await ensureModel();
+    await ensureActiveDetector();
     setStatus('Starting camera…');
     await startCamera();
     setStatus('', false);
@@ -260,6 +324,36 @@ flipBtn.addEventListener('click', async () => {
   } finally {
     flipBtn.disabled = false;
   }
+});
+
+async function switchDetector(key) {
+  if (key === activeDetectorKey) return;
+  const prev = activeDetectorKey;
+  modelRadios.forEach((r) => (r.disabled = true));
+  const prevStatusVisible = !statusEl.classList.contains('hidden');
+  try {
+    setStatus(`Loading ${detectors[key].label}…`);
+    await detectors[key].load();
+    activeDetectorKey = key;
+    detectorGen += 1;
+    tracks.clear();
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    if (!prevStatusVisible) setStatus('', false);
+    else setStatus(`${detectors[key].label} ready`);
+  } catch (err) {
+    console.error(err);
+    setStatus(`Error loading ${detectors[key].label}: ${err.message || err}`);
+    const revert = document.querySelector(`input[name="model"][value="${prev}"]`);
+    if (revert) revert.checked = true;
+  } finally {
+    modelRadios.forEach((r) => (r.disabled = false));
+  }
+}
+
+modelRadios.forEach((r) => {
+  r.addEventListener('change', (e) => {
+    if (e.target.checked) switchDetector(e.target.value);
+  });
 });
 
 window.addEventListener('resize', resizeOverlay);

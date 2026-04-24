@@ -17,13 +17,25 @@
     </div>
 
     <div id="controls">
-      <button id="startBtn" type="button">Start</button>
-      <button id="flipBtn" type="button" disabled>Flip camera</button>
+      <div id="model-picker" role="radiogroup" aria-label="Detection model">
+        <label>
+          <input type="radio" name="model" value="coco-ssd" checked />
+          <span>COCO-SSD</span>
+        </label>
+        <label>
+          <input type="radio" name="model" value="efficientdet-lite0" />
+          <span>EfficientDet-Lite0</span>
+        </label>
+      </div>
+      <div id="buttons">
+        <button id="startBtn" type="button">Start</button>
+        <button id="flipBtn" type="button" disabled>Flip camera</button>
+      </div>
     </div>
   </main>
 
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
-  <script src="app.js" defer></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>
